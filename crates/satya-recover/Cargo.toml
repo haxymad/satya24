@@ -1,0 +1,10 @@
+[package]
+name = "satya-recover"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+satya-core = { path = "../satya-core" }
+satya-parsers = { path = "../satya-parsers" }
+memchr.workspace = true
+rayon.workspace = true

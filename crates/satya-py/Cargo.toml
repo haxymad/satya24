@@ -1,0 +1,16 @@
+[package]
+name = "satya-py"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "_satya_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module"] }
+satya-core = { path = "../satya-core" }
+satya-parsers = { path = "../satya-parsers" }
+satya-recover = { path = "../satya-recover" }
+sha2.workspace = true
+hex.workspace = true

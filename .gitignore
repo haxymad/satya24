@@ -1,0 +1,47 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Maturin / PyO3 build artifacts
+python/*.so
+python/dvr_forensics/*.so
+python/dvr_forensics/*.pyd
+
+# Data (test images can be regenerated)
+data/test_images/*.img
+data/cases/
+*.sqlite
+*.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / local config
+.env
+*.key
+*.pem
+
+# PDF reports (generated)
+reports/
+*.pdf
