@@ -1,0 +1,727 @@
+//! HTTP API + static frontend for SATYA.
+
+use axum::{
+    body::Body,
+    extract::{Path as AxumPath, Query, State},
+    http::{header, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tower_http::services::ServeDir;
+
+#[derive(Clone)]
+pub struct AppState {
+    inner: Arc<Mutex<StateInner>>,
+    web_root: PathBuf,
+}
+
+#[derive(Default, Clone, Serialize)]
+struct StateInner {
+    image_path: String,
+    oem: String,
+    confidence: f32,
+    sha256: String,
+    md5: String,
+    size_bytes: u64,
+    allocated: usize,
+    carved: usize,
+    total_frames: usize,
+    frames_json: Option<String>,
+    timeline_json: Option<String>,
+    mp4_path: Option<PathBuf>,
+    custody: Vec<serde_json::Value>,
+    summary_json: Option<String>,
+}
+
+pub fn router(state: AppState) -> Router {
+    let web = ServeDir::new(&state.web_root);
+
+    Router::new()
+        .route("/api/health", get(|| async { "ok" }))
+        .route("/api/case", get(get_case))
+        .route("/api/identify", post(identify))
+        .route("/api/analyze", post(analyze))
+        .route("/api/frames", get(get_frames))
+        .route("/api/timeline", get(get_timeline))
+        .route("/api/custody", get(get_custody))
+        .route("/api/export", post(export_video))
+        .route("/api/video", get(stream_video))
+        .route("/api/hash", post(hash_image))
+        .route("/api/frame/:idx/hex", get(frame_hex))
+        .route("/api/ml/detect", post(ml_detect))
+        .route("/api/ml/faces", post(ml_faces))
+        .route("/api/ml/motion", post(ml_motion))
+        .route("/api/ml/analyze-all", post(ml_analyze_all))
+        .route("/api/ml/cluster-faces", post(ml_cluster_faces))
+        .route("/api/ml/correlate", post(ml_correlate))
+        .route("/api/ml/thumbnail", post(ml_thumbnail))
+        .route("/api/device", get(get_device))
+        .route("/api/partitions", get(get_partitions))
+        .route("/api/channels", get(get_channels))
+        .route("/api/logs", get(get_logs))
+        .route("/api/allocation", get(get_allocation))
+        .route("/api/stats", get(get_stats))
+        .route("/api/summary", get(get_summary))
+        .route("/api/frame/:idx/thumbnail", get(frame_thumbnail))
+        .route("/api/mcp/tools", get(mcp_tools))
+        .route("/api/report", post(generate_report))
+        .fallback_service(web)
+        .with_state(state)
+}
+
+async fn get_case(State(state): State<AppState>) -> impl IntoResponse {
+    let inner = state.inner.lock().await;
+    Json(inner.clone()).into_response()
+}
+
+#[derive(Deserialize)]
+struct IdentifyRequest { image_path: String }
+
+#[derive(Serialize)]
+struct IdentifyResponse {
+    oem: String,
+    confidence: f32,
+    block_size: Option<u32>,
+    model: Option<String>,
+    firmware: Option<String>,
+}
+
+async fn identify(Json(req): Json<IdentifyRequest>) -> impl IntoResponse {
+    match std::fs::read(&req.image_path) {
+        Ok(data) => match satya_parsers::identify_device(&data) {
+            Some(fp) => (StatusCode::OK, Json(IdentifyResponse {
+                oem: fp.oem.as_str().into(),
+                confidence: fp.confidence,
+                block_size: fp.block_size,
+                model: fp.model,
+                firmware: fp.firmware,
+            })).into_response(),
+            None => (StatusCode::NOT_FOUND, "unknown OEM").into_response(),
+        },
+        Err(e) => (StatusCode::BAD_REQUEST, format!("read: {e}")).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct AnalyzeRequest { image_path: String }
+
+#[derive(Serialize)]
+struct AnalyzeResponse {
+    oem: String,
+    confidence: f32,
+    frames: usize,
+    allocated: usize,
+    carved: usize,
+    sha256: String,
+    md5: String,
+    size_bytes: u64,
+    timeline_entries: usize,
+}
+
+async fn analyze(
+    State(state): State<AppState>,
+    Json(req): Json<AnalyzeRequest>,
+) -> impl IntoResponse {
+    let data = match std::fs::read(&req.image_path) {
+        Ok(d) => d,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("read: {e}")).into_response(),
+    };
+    let fp = match satya_parsers::identify_device(&data) {
+        Some(f) => f,
+        None => return (StatusCode::NOT_FOUND, "unknown OEM").into_response(),
+    };
+    let frames = match satya_parsers::enumerate_frames(&data, fp.oem) {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+
+    let allocated = frames.iter()
+        .filter(|f| matches!(f.recovery_source, satya_core::RecoverySource::Allocated))
+        .count();
+
+    use sha2::{Digest, Sha256};
+    use md5::Md5;
+    let sha256 = hex::encode(Sha256::digest(&data));
+    let md5 = hex::encode(Md5::digest(&data));
+
+    use satya_trust::{fuse_with_diagnostics, to_claim, Source};
+    let mut timeline = Vec::new();
+    for frame in &frames {
+        let mut claims = Vec::new();
+        for c in &frame.claims {
+            let src = match c.source {
+                satya_core::TimestampSource::FrameHeader => Source::FrameHeader,
+                satya_core::TimestampSource::DeviceLog => Source::DeviceLog,
+                satya_core::TimestampSource::OnScreenOcr => Source::OnScreenOcr,
+                satya_core::TimestampSource::NtpSyncLog => Source::NtpSyncLog,
+                satya_core::TimestampSource::SeiMetadata => Source::FrameHeader,
+            };
+            claims.push(to_claim(c.claimed_utc.timestamp() as f64, src, c.confidence as f64));
+        }
+        if claims.is_empty() { continue; }
+        timeline.push(fuse_with_diagnostics(&claims));
+    }
+
+    let frames_json = serde_json::to_string(&frames).ok();
+    let timeline_json = serde_json::to_string(&timeline).ok();
+
+    let mut inner = state.inner.lock().await;
+    inner.image_path = req.image_path.clone();
+    inner.oem = fp.oem.as_str().into();
+    inner.confidence = fp.confidence;
+    inner.sha256 = sha256.clone();
+    inner.md5 = md5.clone();
+    inner.size_bytes = data.len() as u64;
+    inner.allocated = allocated;
+    inner.carved = frames.len() - allocated;
+    inner.total_frames = frames.len();
+    inner.frames_json = frames_json;
+    inner.timeline_json = timeline_json;
+    inner.mp4_path = None;
+    let summary = satya_parsers::analysis::build_summary(&data, &fp, &frames);
+    inner.summary_json = serde_json::to_string(&summary).ok();
+
+    Json(AnalyzeResponse {
+        oem: fp.oem.as_str().into(),
+        confidence: fp.confidence,
+        frames: frames.len(),
+        allocated,
+        carved: frames.len() - allocated,
+        sha256,
+        md5,
+        size_bytes: data.len() as u64,
+        timeline_entries: timeline.len(),
+    }).into_response()
+}
+
+async fn get_frames(State(state): State<AppState>) -> impl IntoResponse {
+    let inner = state.inner.lock().await;
+    match &inner.frames_json {
+        Some(j) => (StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")], j.clone()).into_response(),
+        None => (StatusCode::NOT_FOUND, "no case loaded").into_response(),
+    }
+}
+
+async fn get_timeline(State(state): State<AppState>) -> impl IntoResponse {
+    let inner = state.inner.lock().await;
+    match &inner.timeline_json {
+        Some(j) => (StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")], j.clone()).into_response(),
+        None => (StatusCode::NOT_FOUND, "no case loaded").into_response(),
+    }
+}
+
+async fn get_custody(State(state): State<AppState>) -> impl IntoResponse {
+    let inner = state.inner.lock().await;
+    Json(&inner.custody).into_response()
+}
+
+async fn export_video(State(state): State<AppState>) -> impl IntoResponse {
+    let image_path = {
+        let inner = state.inner.lock().await;
+        if inner.image_path.is_empty() {
+            return (StatusCode::BAD_REQUEST, "analyze a case first").into_response();
+        }
+        inner.image_path.clone()
+    };
+    let img = PathBuf::from(&image_path);
+    let h264 = img.with_extension("h264");
+    let mp4 = img.with_extension("mp4");
+
+    let data = match std::fs::read(&img) {
+        Ok(d) => d,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+    let fp = match satya_parsers::identify_device(&data) {
+        Some(f) => f,
+        None => return (StatusCode::NOT_FOUND, "unknown OEM").into_response(),
+    };
+    let frames = match satya_parsers::enumerate_frames(&data, fp.oem) {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+
+    use std::io::Write;
+    let mut f = match std::fs::File::create(&h264) {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+    for frame in &frames {
+        if frame.length == 0 { continue; }
+        let s = frame.offset as usize;
+        let e = (s + frame.length as usize).min(data.len());
+        if s >= e { continue; }
+        let bytes = &data[s..e];
+        if bytes.starts_with(&[0, 0, 0, 1]) || bytes.starts_with(&[0, 0, 1]) {
+            let _ = f.write_all(bytes);
+        }
+    }
+    drop(f);
+
+    match satya_video::h264_to_mp4(&h264, &mp4) {
+        Ok(()) => {
+            let size = std::fs::metadata(&mp4).map(|m| m.len()).unwrap_or(0);
+            let mut inner = state.inner.lock().await;
+            inner.mp4_path = Some(mp4.clone());
+            Json(serde_json::json!({
+                "mp4": mp4.to_string_lossy(),
+                "size_bytes": size,
+                "url": "/api/video",
+            })).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("ffmpeg: {e}")).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct VideoQuery {
+    #[allow(dead_code)]
+    start_s: Option<f64>,
+}
+
+async fn stream_video(
+    State(state): State<AppState>,
+    Query(_q): Query<VideoQuery>,
+) -> impl IntoResponse {
+    let path = {
+        let inner = state.inner.lock().await;
+        inner.mp4_path.clone()
+    };
+    let Some(path) = path else {
+        return (StatusCode::NOT_FOUND, "no video exported yet").into_response();
+    };
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => {
+            let mut resp = Response::new(Body::from(bytes));
+            resp.headers_mut().insert(header::CONTENT_TYPE,
+                HeaderValue::from_static("video/mp4"));
+            resp.headers_mut().insert(header::ACCEPT_RANGES,
+                HeaderValue::from_static("bytes"));
+            resp
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("read video: {e}")).into_response(),
+    }
+}
+
+async fn hash_image(Json(req): Json<IdentifyRequest>) -> impl IntoResponse {
+    let data = match std::fs::read(&req.image_path) {
+        Ok(d) => d,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("read: {e}")).into_response(),
+    };
+    use sha2::{Digest, Sha256};
+    let digest = hex::encode(Sha256::digest(&data));
+    Json(serde_json::json!({"sha256": digest, "size_bytes": data.len()})).into_response()
+}
+
+async fn frame_hex(
+    State(state): State<AppState>,
+    AxumPath(idx): AxumPath<usize>,
+) -> impl IntoResponse {
+    let (frames_json, image_path) = {
+        let inner = state.inner.lock().await;
+        (inner.frames_json.clone(), inner.image_path.clone())
+    };
+    let Some(fj) = frames_json else {
+        return (StatusCode::NOT_FOUND, "no case").into_response();
+    };
+    let frames: Vec<serde_json::Value> = match serde_json::from_str(&fj) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+    let Some(frame) = frames.get(idx) else {
+        return (StatusCode::NOT_FOUND, "no such frame").into_response();
+    };
+    let offset = frame["offset"].as_u64().unwrap_or(0) as usize;
+    let length = frame["length"].as_u64().unwrap_or(0) as usize;
+    let data = match std::fs::read(&image_path) {
+        Ok(d) => d,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+    let start = offset.min(data.len());
+    let end = (offset + length).min(data.len()).min(offset + 4096);
+    let slice = &data[start..end];
+
+    let mut out = String::new();
+    for (i, chunk) in slice.chunks(16).enumerate() {
+        out.push_str(&format!("{:08x}  ", offset + i * 16));
+        for b in chunk { out.push_str(&format!("{:02x} ", b)); }
+        for _ in chunk.len()..16 { out.push_str("   "); }
+        out.push_str(" |");
+        for b in chunk {
+            let c = if (0x20..0x7f).contains(b) { *b as char } else { '.' };
+            out.push(c);
+        }
+        out.push_str("|\n");
+    }
+    (StatusCode::OK, [(header::CONTENT_TYPE, "text/plain")], out).into_response()
+}
+
+#[derive(Deserialize)]
+struct MLDetectRequest { frame_index: usize }
+
+#[derive(Deserialize)]
+struct MLDetectRequest { frame_index: usize }
+
+#[derive(Deserialize)]
+struct MLMotionRequest {
+    start_frame: usize,
+    end_frame: usize,
+    step: usize,
+    threshold: f32,
+}
+
+#[derive(Deserialize)]
+struct MLAnalyzeRequest {
+    sample_every: usize,
+    run_objects: bool,
+    run_faces: bool,
+    run_motion: bool,
+    conf: f32,
+}
+
+#[derive(Deserialize)]
+struct MLThumbRequest {
+    frame_index: usize,
+    width: usize,
+}
+
+async fn ml_detect(
+    State(state): State<AppState>,
+    Json(req): Json<MLDetectRequest>,
+) -> impl IntoResponse {
+    let mp4 = { let i = state.inner.lock().await; i.mp4_path.clone() };
+    let Some(mp4) = mp4 else {
+        return (StatusCode::BAD_REQUEST, "export MP4 first").into_response();
+    };
+    let payload = serde_json::json!({
+        "video_path": mp4.to_string_lossy(),
+        "frame_index": req.frame_index,
+    });
+    match call_ml_service("/detect", &payload).await {
+        Ok(body) => (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], body).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("ML: {e}")).into_response(),
+    }
+}
+
+async fn ml_faces(
+    State(state): State<AppState>,
+    Json(req): Json<MLDetectRequest>,
+) -> impl IntoResponse {
+    let mp4 = { let i = state.inner.lock().await; i.mp4_path.clone() };
+    let Some(mp4) = mp4 else {
+        return (StatusCode::BAD_REQUEST, "export MP4 first").into_response();
+    };
+    let payload = serde_json::json!({
+        "video_path": mp4.to_string_lossy(),
+        "frame_index": req.frame_index,
+    });
+    match call_ml_service("/faces", &payload).await {
+        Ok(body) => (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], body).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("ML: {e}")).into_response(),
+    }
+}
+
+async fn ml_motion(
+    State(state): State<AppState>,
+    Json(req): Json<MLMotionRequest>,
+) -> impl IntoResponse {
+    let mp4 = { let i = state.inner.lock().await; i.mp4_path.clone() };
+    let Some(mp4) = mp4 else {
+        return (StatusCode::BAD_REQUEST, "export MP4 first").into_response();
+    };
+    let payload = serde_json::json!({
+        "video_path": mp4.to_string_lossy(),
+        "start_frame": req.start_frame,
+        "end_frame": req.end_frame,
+        "step": req.step.max(1),
+        "threshold": req.threshold,
+    });
+    match call_ml_service("/motion", &payload).await {
+        Ok(body) => (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], body).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("ML: {e}")).into_response(),
+    }
+}
+
+async fn ml_analyze_all(
+    State(state): State<AppState>,
+    Json(req): Json<MLAnalyzeRequest>,
+) -> impl IntoResponse {
+    let mp4 = { let i = state.inner.lock().await; i.mp4_path.clone() };
+    let Some(mp4) = mp4 else {
+        return (StatusCode::BAD_REQUEST, "export MP4 first").into_response();
+    };
+    let payload = serde_json::json!({
+        "video_path": mp4.to_string_lossy(),
+        "sample_every": req.sample_every.max(1),
+        "run_objects": req.run_objects,
+        "run_faces": req.run_faces,
+        "run_motion": req.run_motion,
+        "conf": req.conf,
+    });
+    match call_ml_service("/analyze-all", &payload).await {
+        Ok(body) => (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], body).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("ML: {e}")).into_response(),
+    }
+}
+
+async fn ml_cluster_faces(Json(req): Json<serde_json::Value>) -> impl IntoResponse {
+    match call_ml_service("/cluster-faces", &req).await {
+        Ok(body) => (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], body).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("ML: {e}")).into_response(),
+    }
+}
+
+async fn ml_correlate(Json(req): Json<serde_json::Value>) -> impl IntoResponse {
+    match call_ml_service("/correlate", &req).await {
+        Ok(body) => (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], body).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("ML: {e}")).into_response(),
+    }
+}
+
+async fn ml_thumbnail(
+    State(state): State<AppState>,
+    Json(req): Json<MLThumbRequest>,
+) -> impl IntoResponse {
+    let mp4 = { let i = state.inner.lock().await; i.mp4_path.clone() };
+    let Some(mp4) = mp4 else {
+        return (StatusCode::BAD_REQUEST, "export MP4 first").into_response();
+    };
+    let payload = serde_json::json!({
+        "video_path": mp4.to_string_lossy(),
+        "frame_index": req.frame_index,
+        "width": req.width,
+    });
+    match call_ml_service("/thumbnail", &payload).await {
+        Ok(body) => (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], body).into_response(),
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("ML: {e}")).into_response(),
+    }
+}
+
+async fn call_ml_service(path: &str, payload: &serde_json::Value) -> Result<String, String> {
+    let base = std::env::var("SATYA_ML_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8001".into());
+    let url = format!("{base}{path}");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.post(&url).json(payload).send().await
+        .map_err(|e| format!("cannot reach {url}: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("HTTP {status}: {text}"));
+    }
+    Ok(text)
+}
+
+async fn mcp_tools() -> impl IntoResponse {
+    Json(serde_json::json!([
+        {"name": "identify_oem",    "description": "Identify the OEM of a DVR disk image"},
+        {"name": "enumerate_frames","description": "List all video frames including deleted ones"},
+        {"name": "analyze_timeline","description": "Fuse timestamps into per-frame 95% confidence intervals"},
+        {"name": "export_video",    "description": "Extract NAL units and wrap into playable MP4"},
+        {"name": "hash_image",      "description": "Compute SHA-256/MD5/BLAKE3 for evidence integrity"},
+        {"name": "generate_report", "description": "Produce a court-ready PDF report"},
+        {"name": "verify_custody",  "description": "Verify a hybrid Ed25519 signature bundle"},
+    ])).into_response()
+}
+
+async fn generate_report(State(state): State<AppState>) -> impl IntoResponse {
+    let (image_path, oem) = {
+        let inner = state.inner.lock().await;
+        (inner.image_path.clone(), inner.oem.clone())
+    };
+    if image_path.is_empty() {
+        return (StatusCode::BAD_REQUEST, "no case").into_response();
+    }
+    let out = PathBuf::from(&image_path).with_extension("report.pdf");
+
+    let data = match std::fs::read(&image_path) {
+        Ok(d) => d,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+    let fp = match satya_parsers::identify_device(&data) {
+        Some(f) => f,
+        None => return (StatusCode::NOT_FOUND, "unknown OEM").into_response(),
+    };
+    let frames = match satya_parsers::enumerate_frames(&data, fp.oem) {
+        Ok(f) => f,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+
+    use sha2::{Digest, Sha256};
+    let sha256 = hex::encode(Sha256::digest(&data));
+    let allocated = frames.iter()
+        .filter(|f| matches!(f.recovery_source, satya_core::RecoverySource::Allocated))
+        .count();
+
+    use satya_trust::{fuse_with_diagnostics, to_claim, Source};
+    let mut timeline = Vec::new();
+    for frame in &frames {
+        let mut claims = Vec::new();
+        for c in &frame.claims {
+            let src = match c.source {
+                satya_core::TimestampSource::FrameHeader => Source::FrameHeader,
+                satya_core::TimestampSource::DeviceLog => Source::DeviceLog,
+                satya_core::TimestampSource::OnScreenOcr => Source::OnScreenOcr,
+                satya_core::TimestampSource::NtpSyncLog => Source::NtpSyncLog,
+                satya_core::TimestampSource::SeiMetadata => Source::FrameHeader,
+            };
+            claims.push(to_claim(c.claimed_utc.timestamp() as f64, src, c.confidence as f64));
+        }
+        if claims.is_empty() { continue; }
+        timeline.push(fuse_with_diagnostics(&claims));
+    }
+
+    let input = satya_report::ReportInput {
+        case_id: "auto".into(),
+        case_name: format!("{} forensic analysis", oem.to_uppercase()),
+        investigator: "SATYA".into(),
+        organization: "SATYA Project".into(),
+        evidence_path: image_path.clone(),
+        oem: fp.oem.as_str().into(),
+        sha256,
+        total_frames: frames.len(),
+        allocated,
+        carved: frames.len() - allocated,
+        timeline,
+        custody: Vec::new(),
+    };
+
+    match satya_report::generate_report(&input, &out) {
+        Ok(()) => Json(serde_json::json!({
+            "output_pdf": out.to_string_lossy(),
+            "size_bytes": std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0),
+        })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    }
+}
+
+pub async fn run(addr: &str) -> anyhow::Result<()> {
+    let web_root = locate_web_root();
+    let state = AppState {
+        inner: Arc::new(Mutex::new(StateInner::default())),
+        web_root: web_root.clone(),
+    };
+    let app = router(state);
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!("SATYA listening on http://{addr}");
+    tracing::info!("serving frontend from {}", web_root.display());
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn locate_web_root() -> PathBuf {
+    if let Ok(p) = std::env::var("SATYA_WEB_ROOT") {
+        return PathBuf::from(p);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors() {
+            let candidate = ancestor.join("web");
+            if candidate.join("index.html").exists() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from("web")
+}
+
+// ---------------------------------------------------------------------------
+// Analysis detail endpoints
+// ---------------------------------------------------------------------------
+
+async fn get_summary(State(state): State<AppState>) -> impl IntoResponse {
+    let inner = state.inner.lock().await;
+    match &inner.summary_json {
+        Some(j) => (StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")], j.clone()).into_response(),
+        None => (StatusCode::NOT_FOUND, "no case loaded").into_response(),
+    }
+}
+
+async fn get_device(State(state): State<AppState>) -> impl IntoResponse {
+    summary_field(state, "device").await
+}
+
+async fn get_partitions(State(state): State<AppState>) -> impl IntoResponse {
+    summary_field(state, "partitions").await
+}
+
+async fn get_channels(State(state): State<AppState>) -> impl IntoResponse {
+    summary_field(state, "channels").await
+}
+
+async fn get_logs(State(state): State<AppState>) -> impl IntoResponse {
+    summary_field(state, "logs").await
+}
+
+async fn get_allocation(State(state): State<AppState>) -> impl IntoResponse {
+    summary_field(state, "allocation").await
+}
+
+async fn get_stats(State(state): State<AppState>) -> impl IntoResponse {
+    summary_field(state, "stats").await
+}
+
+async fn summary_field(state: AppState, key: &str) -> Response {
+    let inner = state.inner.lock().await;
+    let Some(j) = &inner.summary_json else {
+        return (StatusCode::NOT_FOUND, "no case loaded").into_response();
+    };
+    let v: serde_json::Value = match serde_json::from_str(j) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+    match v.get(key) {
+        Some(field) => (StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            field.to_string()).into_response(),
+        None => (StatusCode::NOT_FOUND, format!("missing field: {key}")).into_response(),
+    }
+}
+
+// Simple thumbnail: 1-bit raster showing where frames sit on the disk.
+async fn frame_thumbnail(
+    State(state): State<AppState>,
+    AxumPath(idx): AxumPath<usize>,
+) -> impl IntoResponse {
+    let (frames_json, image_path) = {
+        let inner = state.inner.lock().await;
+        (inner.frames_json.clone(), inner.image_path.clone())
+    };
+    let Some(fj) = frames_json else {
+        return (StatusCode::NOT_FOUND, "no case").into_response();
+    };
+    let frames: Vec<serde_json::Value> = match serde_json::from_str(&fj) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+    let Some(frame) = frames.get(idx) else {
+        return (StatusCode::NOT_FOUND, "no such frame").into_response();
+    };
+    let offset = frame["offset"].as_u64().unwrap_or(0) as usize;
+    let length = frame["length"].as_u64().unwrap_or(0) as usize;
+    let data = match std::fs::read(&image_path) {
+        Ok(d) => d,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    };
+    // Return a 32-byte hex preview of the frame's first bytes
+    let end = (offset + length).min(data.len()).min(offset + 32);
+    let start = offset.min(data.len());
+    let preview = &data[start..end];
+    let hex: String = preview.iter().map(|b| format!("{:02x}", b)).collect();
+    Json(serde_json::json!({
+        "frame_index": idx,
+        "offset": offset,
+        "length": length,
+        "first_32_bytes_hex": hex,
+    })).into_response()
+}
+

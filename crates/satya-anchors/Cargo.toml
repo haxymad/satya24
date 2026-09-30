@@ -1,0 +1,10 @@
+[package]
+name = "satya-anchors"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+satya-trust = { path = "../satya-trust" }
+chrono.workspace = true
+regex.workspace = true
+serde.workspace = true

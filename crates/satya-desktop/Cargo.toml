@@ -1,0 +1,17 @@
+[package]
+name = "satya-desktop"
+version.workspace = true
+edition.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2" }
+tauri-plugin-dialog = "2"
+satya-api = { path = "../satya-api" }
+tokio = { workspace = true, features = ["full", "signal"] }
+serde_json.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

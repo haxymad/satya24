@@ -1,0 +1,13 @@
+[package]
+name = "satya-custody"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+chrono.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true

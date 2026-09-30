@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>SATYA</title>
+  <style>
+    body { font-family: system-ui; background: #0e0e10; color: #e8e8e8; margin: 0; }
+    header { padding: 16px 24px; border-bottom: 1px solid #222; }
+    h1 { margin: 0; font-size: 18px; }
+    main { padding: 24px; max-width: 900px; margin: 0 auto; }
+    input, button { padding: 8px 12px; font-size: 14px; border-radius: 6px;
+                    border: 1px solid #333; background: #1a1a1f; color: #e8e8e8; }
+    button { cursor: pointer; background: #e94560; border: none; color: white; }
+    pre { background: #1a1a1f; padding: 16px; border-radius: 8px;
+          overflow: auto; max-height: 500px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header><h1>SATYA — DVR Forensic Analyzer</h1></header>
+  <main>
+    <p>Image path: <input id="img" size="60" value="/absolute/path/to/image.img"></p>
+    <button onclick="analyze()">Analyze</button>
+    <h2>Result</h2>
+    <pre id="out">idle</pre>
+  </main>
+  <script>
+    async function analyze() {
+      const path = document.getElementById('img').value;
+      document.getElementById('out').textContent = 'analyzing...';
+      try {
+        const r = await fetch('/api/analyze', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({image_path: path})
+        });
+        const j = await r.json();
+        document.getElementById('out').textContent = JSON.stringify(j, null, 2);
+      } catch (e) {
+        document.getElementById('out').textContent = 'error: ' + e;
+      }
+    }
+  </script>
+</body>
+</html>

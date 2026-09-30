@@ -1,3 +1,4 @@
+pub mod analysis;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -20,6 +21,7 @@ pub type Result<T> = std::result::Result<T, DvrError>;
 pub enum Oem {
     Hikvision,
     Dahua,
+    Wfs,
     CpPlus,
     Honeywell,
     Uniview,
@@ -33,14 +35,15 @@ impl Oem {
     pub fn as_str(&self) -> &'static str {
         match self {
             Oem::Hikvision => "hikvision",
-            Oem::Dahua => "dahua",
-            Oem::CpPlus => "cpplus",
+            Oem::Dahua     => "dahua",
+            Oem::Wfs       => "wfs",
+            Oem::CpPlus    => "cpplus",
             Oem::Honeywell => "honeywell",
-            Oem::Uniview => "uniview",
-            Oem::TpLink => "tplink",
-            Oem::Godrej => "godrej",
-            Oem::Matrix => "matrix",
-            Oem::Unknown => "unknown",
+            Oem::Uniview   => "uniview",
+            Oem::TpLink    => "tplink",
+            Oem::Godrej    => "godrej",
+            Oem::Matrix    => "matrix",
+            Oem::Unknown   => "unknown",
         }
     }
 }
@@ -91,7 +94,6 @@ pub struct DeviceFingerprint {
     pub confidence: f32,
 }
 
-/// Every OEM parser implements this trait.
 pub trait DvrFileSystem {
     fn identify(image: &[u8]) -> Option<DeviceFingerprint>
     where

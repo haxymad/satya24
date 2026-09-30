@@ -1,0 +1,8 @@
+[package]
+name = "satya-video"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+satya-core = { path = "../satya-core" }
+thiserror.workspace = true
