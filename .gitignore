@@ -1,47 +1,14 @@
-# Rust
-/target/
-**/*.rs.bk
-Cargo.lock
-*.sh
-# Python
-__pycache__/
-*.py[cod]
-*.so
-*.egg-info/
+target/
+**/__pycache__/
+*.pyc
+.cache/
 .venv/
 venv/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-build/
-dist/
-
-# Maturin / PyO3 build artifacts
-python/*.so
-python/dvr_forensics/*.so
-python/dvr_forensics/*.pyd
-
-# Data (test images can be regenerated)
-data/test_images/*.img
-data/cases/
-*.sqlite
-*.db
-
-# IDE
-.vscode/
+node_modules/
+.satya_backup*/
+satya_out/
+*.E0[0-9]
+crates/satya-desktop/gen/
 .idea/
-*.swp
-*.swo
-
-# OS
+.vscode/
 .DS_Store
-Thumbs.db
-
-# Secrets / local config
-.env
-*.key
-*.pem
-
-# PDF reports (generated)
-reports/
-*.pdf
