@@ -28,6 +28,8 @@ pub enum Oem {
     TpLink,
     Godrej,
     Matrix,
+    /// JUAN-made NVRs (HeimVision, Zosi, Hiseeu, Kogan rebrands).
+    Juan,
     Unknown,
 }
 
@@ -43,6 +45,7 @@ impl Oem {
             Oem::TpLink    => "tplink",
             Oem::Godrej    => "godrej",
             Oem::Matrix    => "matrix",
+            Oem::Juan      => "juan",
             Oem::Unknown   => "unknown",
         }
     }

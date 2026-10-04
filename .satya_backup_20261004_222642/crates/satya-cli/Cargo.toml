@@ -1,0 +1,22 @@
+[package]
+name = "satya-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "satya-cli"
+path = "src/main.rs"
+
+[dependencies]
+satya-core = { path = "../satya-core" }
+satya-parsers = { path = "../satya-parsers" }
+satya-recover = { path = "../satya-recover" }
+satya-trust = { path = "../satya-trust" }
+satya-custody = { path = "../satya-custody" }
+satya-video = { path = "../satya-video" }
+satya-report = { path = "../satya-report" }
+clap.workspace = true
+sha2.workspace = true
+hex.workspace = true
+serde_json.workspace = true
+chrono.workspace = true

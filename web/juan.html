@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SATYA · JUAN / HeimVision</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/juan.css">
+<style>
+  html,body{height:auto;overflow:auto;display:block}
+  header{display:flex;align-items:center;gap:8px;padding:12px;background:var(--bg-2);border-bottom:1px solid var(--border);font-size:15px}
+  header a{margin-left:auto;color:var(--accent-2);font-size:12px}
+</style>
+</head>
+<body>
+<header><span style="color:var(--accent)">◈</span><strong>SATYA</strong><span class="muted">JUAN / HeimVision</span><a href="/">Full UI</a></header>
+<div id="juan-panel"></div>
+<script type="module">
+  import { initJuan } from "/views/juan.js";
+  initJuan(document.getElementById("juan-panel"));
+</script>
+</body>
+</html>

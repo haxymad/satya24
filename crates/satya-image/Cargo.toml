@@ -1,0 +1,15 @@
+[package]
+name = "satya-image"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Streaming, read-only access to evidence images (raw/dd and E01), GPT/MBR and FAT32"
+
+[dependencies]
+ewf = "0.4"
+md-5.workspace = true
+sha2.workspace = true
+sha1 = "0.10"
+hex.workspace = true
+serde.workspace = true
+chrono.workspace = true

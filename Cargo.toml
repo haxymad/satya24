@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/satya-core",
+    "crates/satya-image",
     "crates/satya-parsers",
     "crates/satya-recover",
     "crates/satya-trust",
@@ -44,7 +45,7 @@ axum = "0.7"
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.5", features = ["fs", "cors"] }
 anyhow = "1"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rmcp = { version = "0.15", features = ["server", "transport-io", "macros"] }
 schemars = "0.8"
 

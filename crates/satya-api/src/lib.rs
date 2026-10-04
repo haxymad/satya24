@@ -15,6 +15,14 @@ use tokio::sync::Mutex;
 use tower_http::services::ServeDir;
 
 mod image_fs;
+mod case_api;
+mod explorer_api;
+mod juan_api;
+mod juan_case;
+mod report_api;
+mod settings_api;
+
+pub(crate) use case_api::log_event;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -39,6 +47,9 @@ struct StateInner {
     summary_json: Option<String>,
     mp4_path: Option<PathBuf>,
     custody: Vec<serde_json::Value>,
+    /// Set when the case is a JUAN/HeimVision image (streamed, E01 or raw).
+    #[serde(skip)]
+    juan_scan: Option<Arc<satya_parsers::juan::JuanScan>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -77,8 +88,43 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hex-at", get(hex_at))
         .route("/api/image/node", get(image_node))
         .route("/api/ml/persons", post(ml_persons))
+        .route("/api/juan/scan", post(juan_api::scan))
+        .route("/api/juan/status", get(juan_api::status))
+        .route("/api/juan/slots", get(juan_api::slots))
+        .route("/api/juan/export", post(juan_api::export))
+        // Menu bar
+        .route("/api/case/save", post(case_api::save_case))
+        .route("/api/case/close", post(case_api::close_case))
+        .route("/api/case/export-csv", post(case_api::export_csv))
+        .route("/api/verify/start", post(case_api::verify_start))
+        .route("/api/verify/status", get(case_api::verify_status))
+        .route("/api/outputs", get(case_api::outputs))
+        // Explorer: inside the evidence image
+        .route("/api/x/image", get(explorer_api::x_image))
+        .route("/api/x/list", get(explorer_api::x_list))
+        .route("/api/x/info", get(explorer_api::x_info))
+        .route("/api/x/read", get(explorer_api::x_read))
+        .route("/api/x/raw", get(explorer_api::x_raw))
+        .route("/api/x/extract", post(explorer_api::x_extract))
+        .route("/api/x/play", post(explorer_api::x_play))
+        // Explorer: local disk
+        .route("/api/local/roots", get(explorer_api::local_roots))
+        .route("/api/local/list", get(explorer_api::local_list))
+        .route("/api/local/read", get(explorer_api::local_read))
+        .route("/api/local/raw", get(explorer_api::local_raw))
+        // AI provider settings (MCP tab)
+        .route("/api/settings", get(settings_api::get).post(settings_api::put))
+        .route("/api/settings/test", post(settings_api::test))
         .fallback_service(web)
+        // The desktop window (WebKit) caches aggressively; without this it can
+        // keep showing an old UI after an update.
+        .layer(axum::middleware::map_response(no_cache))
         .with_state(state)
+}
+
+async fn no_cache(mut res: Response) -> Response {
+    res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    res
 }
 
 // ---------------------------------------------------------------------------
@@ -100,7 +146,17 @@ struct IdentifyResponse {
 }
 
 async fn identify(Json(req): Json<IdentifyRequest>) -> impl IntoResponse {
-    match std::fs::read(&req.image_path) {
+    let path = req.image_path.clone();
+    if let Ok(Some(fp)) = tokio::task::spawn_blocking(move || juan_api::detect(&path)).await {
+        return (StatusCode::OK, Json(IdentifyResponse {
+            oem: fp.oem.as_str().into(), confidence: fp.confidence,
+            block_size: fp.block_size, model: fp.model, firmware: fp.firmware,
+        })).into_response();
+    }
+    if let Err(msg) = juan_api::legacy_guard(&req.image_path) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
+    match juan_case::read_all(&req.image_path) {
         Ok(data) => match satya_parsers::identify_device(&data) {
             Some(fp) => (StatusCode::OK, Json(IdentifyResponse {
                 oem: fp.oem.as_str().into(), confidence: fp.confidence,
@@ -127,9 +183,16 @@ async fn analyze(
     State(state): State<AppState>,
     Json(req): Json<AnalyzeRequest>,
 ) -> impl IntoResponse {
-    let data = match std::fs::read(&req.image_path) {
+    let path = req.image_path.clone();
+    if let Ok(Some(_)) = tokio::task::spawn_blocking(move || juan_api::detect(&path)).await {
+        return analyze_juan(state, req.image_path).await;
+    }
+    if let Err(msg) = juan_api::legacy_guard(&req.image_path) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
+    let data = match juan_case::read_all(&req.image_path) {
         Ok(d) => d,
-        Err(e) => return (StatusCode::BAD_REQUEST, format!("read: {e}")).into_response(),
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
     let fp = match satya_parsers::identify_device(&data) {
         Some(f) => f,
@@ -183,6 +246,7 @@ async fn analyze(
     inner.frames_json = frames_json;
     inner.timeline_json = timeline_json;
     inner.mp4_path = None;
+    inner.juan_scan = None;
 
     let summary = satya_parsers::analysis::build_summary(&data, &fp, &frames);
     inner.summary_json = serde_json::to_string(&summary).ok();
@@ -203,6 +267,12 @@ async fn analyze(
         }
     }
 
+    drop(inner);
+    log_event(&state, serde_json::json!({
+        "action": "analyze", "image": req.image_path, "oem": fp.oem.as_str(),
+        "frames": frames.len(), "sha256": sha256,
+    })).await;
+
     Json(AnalyzeResponse {
         oem: fp.oem.as_str().into(),
         confidence: fp.confidence,
@@ -213,6 +283,62 @@ async fn analyze(
         size_bytes: data.len() as u64,
         timeline_entries: timeline.len(),
     }).into_response()
+}
+
+/// Streaming analysis of a JUAN/HeimVision image (E01 or raw). Fills the
+/// same case state as the legacy path, so every tab of the UI works.
+async fn analyze_juan(state: AppState, image_path: String) -> Response {
+    let path = image_path.clone();
+    let case = match tokio::task::spawn_blocking(move || juan_case::analyze(&path)).await {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("worker: {e}")).into_response(),
+    };
+    let allocated = case.frames.iter()
+        .filter(|f| matches!(f.recovery_source, satya_core::RecoverySource::Allocated))
+        .count();
+
+    let mut inner = state.inner.lock().await;
+    inner.image_path = image_path;
+    inner.oem = case.fp.oem.as_str().into();
+    inner.confidence = case.fp.confidence;
+    inner.sha256 = case.sha256.clone();
+    inner.md5 = case.md5.clone();
+    inner.size_bytes = case.size_bytes;
+    inner.allocated = allocated;
+    inner.carved = case.frames.len() - allocated;
+    inner.total_frames = case.frames.len();
+    inner.frames_json = serde_json::to_string(&case.frames).ok();
+    inner.timeline_json = serde_json::to_string(&case.timeline).ok();
+    inner.summary_json = serde_json::to_string(&case.summary).ok();
+    inner.juan_scan = Some(case.scan.clone());
+    inner.mp4_path = case.preview_mp4.clone();
+    inner.video_path = case.preview_mp4.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+    if let Some(p) = &case.preview_mp4 {
+        tracing::info!("JUAN preview (H.264 viewing copy) -> {}", p.display());
+    }
+    drop(inner);
+    log_event(&state, serde_json::json!({
+        "action": "analyze", "image": inner_image_name(&state).await, "oem": case.fp.oem.as_str(),
+        "slots": case.frames.len(), "stored_md5": case.md5,
+    })).await;
+
+    Json(AnalyzeResponse {
+        oem: case.fp.oem.as_str().into(),
+        confidence: case.fp.confidence,
+        frames: case.frames.len(),
+        allocated,
+        carved: case.frames.len() - allocated,
+        sha256: case.sha256,
+        md5: case.md5,
+        size_bytes: case.size_bytes,
+        timeline_entries: case.timeline.len(),
+    }).into_response()
+}
+
+async fn inner_image_name(state: &AppState) -> String {
+    let p = state.inner.lock().await.image_path.clone();
+    Path::new(&p).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or(p)
 }
 
 async fn get_frames(State(state): State<AppState>) -> impl IntoResponse {
@@ -243,20 +369,50 @@ async fn get_custody(State(state): State<AppState>) -> impl IntoResponse {
 // ---------------------------------------------------------------------------
 
 async fn export_video(State(state): State<AppState>) -> impl IntoResponse {
-    let image_path = {
+    let (image_path, juan_scan) = {
         let inner = state.inner.lock().await;
         if inner.image_path.is_empty() {
             return (StatusCode::BAD_REQUEST, "analyze a case first").into_response();
         }
-        inner.image_path.clone()
+        (inner.image_path.clone(), inner.juan_scan.clone())
     };
+    if let Some(scan) = juan_scan {
+        // Full export of every recorded slot. The Viewer keeps playing the
+        // H.264 preview; the exported MP4 is H.265 (play it in VLC/mpv).
+        let path = image_path.clone();
+        return match tokio::task::spawn_blocking(move || juan_case::export_all(&path, &scan)).await {
+            Ok(Ok(r)) => {
+                let mp4 = r.mp4_path.clone().unwrap_or_else(|| r.hevc_path.clone());
+                let size = std::fs::metadata(&mp4).map(|m| m.len()).unwrap_or(0);
+                log_event(&state, serde_json::json!({
+                    "action": "export", "file": r.hevc_path, "bytes": r.report.bytes_written,
+                    "md5": r.report.md5, "sha256": r.report.sha256, "manifest": r.manifest_path,
+                })).await;
+                Json(serde_json::json!({
+                    "mp4": mp4,
+                    "size_bytes": size,
+                    "hevc": r.hevc_path,
+                    "manifest": r.manifest_path,
+                    "sha256": r.report.sha256,
+                    "md5": r.report.md5,
+                    "mp4_error": r.mp4_error,
+                    "url": "/api/video",
+                })).into_response()
+            }
+            Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("worker: {e}")).into_response(),
+        };
+    }
     let img = PathBuf::from(&image_path);
     let h264 = img.with_extension("h264");
     let mp4 = img.with_extension("mp4");
 
-    let data = match std::fs::read(&img) {
+    if let Err(msg) = juan_api::legacy_guard(&image_path) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
+    let data = match juan_case::read_all(&image_path) {
         Ok(d) => d,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("read: {e}")).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
     let fp = match satya_parsers::identify_device(&data) {
         Some(f) => f,
@@ -416,13 +572,20 @@ async fn read_range(path: &Path, start: u64, length: u64) -> std::io::Result<Vec
 }
 
 async fn hash_image(Json(req): Json<IdentifyRequest>) -> impl IntoResponse {
-    let data = match std::fs::read(&req.image_path) {
-        Ok(d) => d,
-        Err(e) => return (StatusCode::BAD_REQUEST, format!("read: {e}")).into_response(),
-    };
-    use sha2::{Digest, Sha256};
-    let digest = hex::encode(Sha256::digest(&data));
-    Json(serde_json::json!({"sha256": digest, "size_bytes": data.len()})).into_response()
+    // Streams the logical media (for E01: the acquired disk, not the container).
+    let path = req.image_path.clone();
+    let res = tokio::task::spawn_blocking(move || -> Result<satya_image::hashing::MediaHashes, String> {
+        let src = satya_image::open_image(Path::new(&path)).map_err(|e| format!("open: {e}"))?;
+        satya_image::hashing::hash_media(src.as_ref(), |_, _| {}).map_err(|e| format!("read: {e}"))
+    }).await;
+    match res {
+        Ok(Ok(h)) => Json(serde_json::json!({
+            "sha256": h.sha256, "md5": h.md5, "sha1": h.sha1, "size_bytes": h.bytes,
+            "stored_md5": h.stored_md5, "md5_matches_stored": h.md5_matches,
+        })).into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, e).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("worker: {e}")).into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -448,12 +611,10 @@ async fn frame_hex(
     };
     let offset = frame["offset"].as_u64().unwrap_or(0) as usize;
     let length = frame["length"].as_u64().unwrap_or(0) as usize;
-    let data = match std::fs::read(&image_path) {
-        Ok(d) => d, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    let data = match juan_case::read_range(&image_path, offset as u64, length.min(4096)) {
+        Ok((_, d)) => d, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
-    let start = offset.min(data.len());
-    let end = (offset + length).min(data.len()).min(offset + 4096);
-    let slice = &data[start..end];
+    let slice = &data[..];
 
     let mut out = String::new();
     for (i, chunk) in slice.chunks(16).enumerate() {
@@ -646,7 +807,10 @@ async fn mcp_tools() -> impl IntoResponse {
     ])).into_response()
 }
 
-async fn generate_report(State(state): State<AppState>) -> impl IntoResponse {
+async fn generate_report(
+    State(state): State<AppState>,
+    body: Option<Json<report_api::ReportOptions>>,
+) -> impl IntoResponse {
     let (image_path, oem) = {
         let inner = state.inner.lock().await;
         (inner.image_path.clone(), inner.oem.clone())
@@ -654,10 +818,34 @@ async fn generate_report(State(state): State<AppState>) -> impl IntoResponse {
     if image_path.is_empty() {
         return (StatusCode::BAD_REQUEST, "no case").into_response();
     }
-    let out = PathBuf::from(&image_path).with_extension("report.pdf");
 
-    let data = match std::fs::read(&image_path) {
-        Ok(d) => d, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    // JUAN cases: detailed forensic report (evidence frames, timeline,
+    // integrity, deleted entries, activity log), written to the output folder.
+    let juan = {
+        let i = state.inner.lock().await;
+        i.juan_scan.clone().map(|scan| (scan, i.custody.clone()))
+    };
+    if let Some((scan, activity)) = juan {
+        let opts = body.map(|Json(o)| o).unwrap_or_default();
+        let img = image_path.clone();
+        let res = tokio::task::spawn_blocking(move || report_api::build_and_write(&img, &scan, &opts, &activity)).await;
+        return match res {
+            Ok(Ok((pdf, sha256))) => {
+                let size = std::fs::metadata(&pdf).map(|m| m.len()).unwrap_or(0);
+                log_event(&state, serde_json::json!({"action": "report", "file": pdf, "bytes": size, "sha256": sha256})).await;
+                Json(serde_json::json!({ "output_pdf": pdf, "size_bytes": size, "sha256": sha256 })).into_response()
+            }
+            Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("worker: {e}")).into_response(),
+        };
+    }
+
+    let out = PathBuf::from(&image_path).with_extension("report.pdf");
+    if let Err(msg) = juan_api::legacy_guard(&image_path) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
+    let data = match juan_case::read_all(&image_path) {
+        Ok(d) => d, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
     let fp = match satya_parsers::identify_device(&data) {
         Some(f) => f, None => return (StatusCode::NOT_FOUND, "unknown OEM").into_response(),
@@ -860,12 +1048,10 @@ async fn image_hex(
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
 
-    let data = match std::fs::read(&image_path) {
-        Ok(d) => d, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    let data = match juan_case::read_range(&image_path, start, end.saturating_sub(start) as usize) {
+        Ok((_, d)) => d, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
-    let s = start.min(data.len() as u64) as usize;
-    let e = end.min(data.len() as u64) as usize;
-    let slice = &data[s..e];
+    let slice = &data[..];
 
     let mut out = String::new();
     for (i, chunk) in slice.chunks(16).enumerate() {
@@ -1044,13 +1230,11 @@ async fn hex_at(
     if image_path.is_empty() {
         return (StatusCode::BAD_REQUEST, "no case loaded").into_response();
     }
-    let data = match std::fs::read(&image_path) {
-        Ok(d) => d, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
-    };
-    let offset = q.offset.min(data.len() as u64) as usize;
     let length = q.length.unwrap_or(512).min(65536) as usize;
-    let end = (offset + length).min(data.len());
-    let slice = &data[offset..end];
+    let (offset, data) = match juan_case::read_range(&image_path, q.offset, length) {
+        Ok((o, d)) => (o as usize, d), Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
+    let slice = &data[..];
 
     let mut out = String::new();
     for (i, chunk) in slice.chunks(16).enumerate() {

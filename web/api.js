@@ -24,7 +24,7 @@ export const api = {
   loadVideo:   (path)         => post("/api/load-video", { path }),
   hash:        (image_path)   => post("/api/hash", { image_path }),
   mcpTools:    ()             => get("/api/mcp/tools"),
-  genReport:   ()             => post("/api/report"),
+  genReport:   (opts = {})    => post("/api/report", opts),
   frameHex:    (idx)          => get(`/api/frame/${idx}/hex`),
   videoUrl:    ()             => "/api/video",
   device:      ()             => get("/api/device"),

@@ -7,6 +7,7 @@ pub mod uniview;
 pub mod tplink;
 pub mod godrej;
 pub mod matrix;
+pub mod juan;
 pub mod nal_scan;
 pub mod analysis;
 pub mod video_region;
@@ -14,7 +15,10 @@ pub mod video_region;
 use satya_core::*;
 
 pub fn identify_device(image: &[u8]) -> Option<DeviceFingerprint> {
-    hikvision::HikvisionFs::identify(image)
+    // Structural JUAN check first: it needs specific files on a FAT32
+    // volume, so it cannot be fooled the way signature-only checks can.
+    juan::JuanFs::identify(image)
+    .or_else(|| hikvision::HikvisionFs::identify(image))
     .or_else(|| dahua::DahuaFs::identify(image))
     .or_else(|| wfs::WfsFs::identify(image))
     .or_else(|| matrix::MatrixFs::identify(image))
@@ -36,6 +40,7 @@ pub fn enumerate_frames(image: &[u8], oem: Oem) -> Result<Vec<RecoveredFrame>> {
         Oem::TpLink    => tplink::TpLinkFs::enumerate_frames(image),
         Oem::Godrej    => godrej::GodrejFs::enumerate_frames(image),
         Oem::Matrix    => matrix::MatrixFs::enumerate_frames(image),
+        Oem::Juan      => juan::JuanFs::enumerate_frames(image),
         Oem::Unknown   => Err(DvrError::UnsupportedOem("unknown".into())),
     }
 }

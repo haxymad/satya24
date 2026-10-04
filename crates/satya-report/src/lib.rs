@@ -14,6 +14,8 @@
 //!  11. Legal certificate (BSA §63(4))
 //!  12. Appendix — full frame index
 
+pub mod forensic;
+
 use chrono::{DateTime, Utc};
 use printpdf::*;
 use satya_custody::Checkpoint;

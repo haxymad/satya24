@@ -1,0 +1,10 @@
+[package]
+name = "satya-parsers"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+satya-core = { path = "../satya-core" }
+binrw.workspace = true
+memchr.workspace = true
+chrono.workspace = true

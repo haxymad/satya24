@@ -43,3 +43,55 @@ pub fn h264_to_mp4(raw_h264_path: &Path, out_mp4: &Path) -> Result<(), VideoErro
     }
     Ok(())
 }
+
+/// Wrap a raw H.265 (Annex B) stream in MP4 without re-encoding.
+///
+/// Raw elementary streams carry no timing, so `fps` only sets playback
+/// speed; evidential times come from the recorder's own headers.
+pub fn hevc_to_mp4(raw_hevc_path: &Path, out_mp4: &Path, fps: f64) -> Result<(), VideoError> {
+    let rate = format!("{fps:.3}");
+    let out = Command::new("ffmpeg")
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-f", "hevc", "-r", &rate])
+        .arg("-i")
+        .arg(raw_hevc_path)
+        .args(["-c:v", "copy", "-tag:v", "hvc1", "-movflags", "+faststart"])
+        .arg(out_mp4)
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                VideoError::FfmpegMissing
+            } else {
+                VideoError::Io(e)
+            }
+        })?;
+    if !out.status.success() {
+        return Err(VideoError::FfmpegFailed(String::from_utf8_lossy(&out.stderr).into_owned()));
+    }
+    Ok(())
+}
+
+/// Re-encode a raw H.265 stream to an H.264 MP4 for viewing in a browser
+/// (most browsers on Linux cannot play H.265). This is a viewing copy only:
+/// evidence stays in the original H.265 stream and its hashes.
+pub fn hevc_to_h264_preview(raw_hevc_path: &Path, out_mp4: &Path, fps: f64) -> Result<(), VideoError> {
+    let rate = format!("{fps:.3}");
+    let out = Command::new("ffmpeg")
+        .args(["-y", "-hide_banner", "-loglevel", "error", "-f", "hevc", "-r", &rate])
+        .arg("-i")
+        .arg(raw_hevc_path)
+        .args(["-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-pix_fmt", "yuv420p"])
+        .args(["-an", "-movflags", "+faststart"])
+        .arg(out_mp4)
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                VideoError::FfmpegMissing
+            } else {
+                VideoError::Io(e)
+            }
+        })?;
+    if !out.status.success() {
+        return Err(VideoError::FfmpegFailed(String::from_utf8_lossy(&out.stderr).into_owned()));
+    }
+    Ok(())
+}

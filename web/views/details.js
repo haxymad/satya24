@@ -1,6 +1,7 @@
 const $ = (id) => document.getElementById(id);
 
 export function renderDetails(state) {
+  if (!$("hex-pre")) return; // details pane removed from the layout
   const sel = state.selectedFrame;
   if (!sel) {
     $("hex-pre").textContent = "no frame selected";

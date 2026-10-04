@@ -32,7 +32,9 @@ body{font-family:var(--sans);font-size:12px;background:var(--bg);color:var(--fg)
 .toolbar-actions select{padding:5px 8px;background:var(--bg-3);border:1px solid var(--border-2);
   color:var(--fg);font-size:11px;border-radius:3px}
 .tb-btn{background:var(--bg-4);color:var(--fg);padding:5px 10px}
-#main{display:grid;grid-template-columns:240px 1fr 340px;overflow:hidden}
+#main{display:grid;grid-template-columns:240px 1fr;overflow:hidden}
+#main.no-side{grid-template-columns:1fr}
+#main.no-side #pane-tree{display:none}
 #pane-tree,#pane-details{background:var(--bg-2);border-right:1px solid var(--border);
   overflow:hidden;display:flex;flex-direction:column}
 #pane-details{border-right:none;border-left:1px solid var(--border)}

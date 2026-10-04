@@ -18,6 +18,8 @@ pub fn locate(image: &[u8], oem: Oem) -> Option<(usize, usize)> {
         Oem::TpLink => locate_tplink(image),
         Oem::Godrej => locate_godrej(image),
         Oem::Matrix => locate_matrix(image),
+        // JUAN payloads live in many FAT32 slots; use juan::JuanVolume::export_hevc.
+        Oem::Juan => None,
         Oem::Unknown => None,
     }
 }

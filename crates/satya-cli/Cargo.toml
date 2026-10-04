@@ -20,3 +20,5 @@ sha2.workspace = true
 hex.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+satya-image = { path = "../satya-image" }
+serde.workspace = true

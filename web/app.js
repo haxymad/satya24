@@ -12,7 +12,8 @@ import { renderChannels } from "./views/channels.js";
 import { renderLogs } from "./views/logs.js";
 import { renderAllocation } from "./views/allocation.js";
 import { initFiles } from "./views/files.js";
-import { initImageFs, loadImageRoot } from "./views/image_fs.js";
+import { initExplorers, refreshImageExplorer } from "./views/explorer.js";
+import { initMenu, toast } from "./menu.js";
 import { initPersons } from "./views/persons.js";
 
 const $ = (id) => document.getElementById(id);
@@ -69,7 +70,7 @@ async function doAnalyze() {
 
     // Auto-load the video so Viewer tab works without clicking Export
     reloadVideo();
-    loadImageRoot();
+    refreshImageExplorer();
   } catch (e) {
     setStatus("error: " + e.message, true);
   } finally {
@@ -84,7 +85,7 @@ async function doExport() {
     setStatus(`exported ${(r.size_bytes / 1e6).toFixed(1)} MB → ${r.mp4}`);
     document.querySelector('[data-view="viewer"]').click();
     reloadVideo();
-    loadImageRoot();
+    refreshImageExplorer();
   } catch (e) {
     setStatus("export error: " + e.message, true);
   }
@@ -93,7 +94,14 @@ async function doExport() {
 async function doReport() {
   setStatus("generating PDF…");
   try {
-    const r = await api.genReport();
+    const val = (id) => document.getElementById(id)?.value?.trim() || "";
+    const thumbs = parseInt(val("rf-thumbs"), 10);
+    setStatus("generating PDF… (decoding evidence frames, this can take a minute)");
+    const r = await api.genReport({
+      case_id: val("rf-case-id"), case_name: val("rf-case-name"), examiner: val("rf-examiner"),
+      organization: val("rf-org"), notes: val("rf-notes"), thumbnails: isNaN(thumbs) ? null : thumbs,
+    });
+    toast(`Report saved: ${r.output_pdf.split("/").pop()}`);
     setStatus(`PDF written: ${r.output_pdf}`);
     $("report-status").textContent = r.output_pdf;
   } catch (e) {
@@ -114,7 +122,9 @@ document.querySelectorAll("#center-tabs .tab").forEach((btn) => {
     if (v === "channels") renderChannels(state);
     if (v === "logs") renderLogs(state);
     if (v === "allocation") renderAllocation(state);
-    if (v === "image_fs") loadImageRoot();
+    if (v === "xplore") refreshImageExplorer();
+    if (v === "mcp") renderMCP(state);
+    if (v === "custody") renderCustody(state);
   });
 });
 
@@ -147,7 +157,8 @@ document.addEventListener("video-loaded", () => {
 });
 
 initFiles();
-initImageFs();
+initMenu();
+initExplorers();
 initPersons();
 renderML(state);
 setStatus("ready — pick an image from the Files panel or type a path");

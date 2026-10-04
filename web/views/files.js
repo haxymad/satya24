@@ -1,6 +1,8 @@
 const $ = (id) => document.getElementById(id);
 
 let currentPath = "";
+// Disk images the Analyze button accepts (E01 = first segment of an EnCase/FTK image).
+const IMAGE_EXTS = ["img", "dd", "raw", "e01"];
 
 export async function initFiles() {
   const roots = await fetch("/api/fs/roots").then((r) => r.json());
@@ -45,7 +47,7 @@ function fmtSize(bytes) {
 
 function classFor(entry) {
   if (entry.is_dir) return "dir";
-  if (entry.ext === "img" || entry.ext === "dd" || entry.ext === "raw") return "img";
+  if (IMAGE_EXTS.includes(entry.ext)) return "img";
   if (["mp4", "h264", "mkv", "webm", "avi"].includes(entry.ext)) return "vid";
   return "";
 }
@@ -84,7 +86,7 @@ function onEntry(row) {
     return;
   }
 
-  if (ext === "img" || ext === "dd" || ext === "raw") {
+  if (IMAGE_EXTS.includes(ext)) {
     $("image-path").value = path;
     document.getElementById("status").textContent = `selected image: ${path}`;
     return;

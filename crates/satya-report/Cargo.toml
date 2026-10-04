@@ -10,7 +10,7 @@ satya-custody = { path = "../satya-custody" }
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
-printpdf.workspace = true
+printpdf = { workspace = true, features = ["embedded_images"] }
 thiserror.workspace = true
 sha2.workspace = true
 hex.workspace = true

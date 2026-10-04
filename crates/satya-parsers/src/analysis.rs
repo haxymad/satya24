@@ -50,6 +50,7 @@ pub fn extract_device_info(image: &[u8], fp: &DeviceFingerprint) -> DeviceInfo {
     info.manufacturer_string = match fp.oem {
         Oem::Hikvision => Some("Hangzhou Hikvision Digital Technology Co., Ltd.".into()),
         Oem::Dahua => Some("Zhejiang Dahua Technology Co., Ltd.".into()),
+        Oem::Juan => Some("JUAN (OEM for HeimVision / Zosi / Hiseeu / Kogan)".into()),
         _ => None,
     };
     info

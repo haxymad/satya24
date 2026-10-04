@@ -8,3 +8,8 @@ satya-core = { path = "../satya-core" }
 binrw.workspace = true
 memchr.workspace = true
 chrono.workspace = true
+satya-image = { path = "../satya-image" }
+serde.workspace = true
+sha2.workspace = true
+md-5.workspace = true
+hex.workspace = true

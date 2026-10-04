@@ -5,16 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SATYA — DVR Forensic Analyzer</title>
 <link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/explorer.css">
 </head>
 <body>
 <div id="case-bar">
   <div class="case-title">
     <span class="logo">◈</span>
     <strong>SATYA Forensic Analyzer</strong>
+    <nav id="menubar"></nav>
     <span class="case-name" id="case-name">[no case loaded]</span>
   </div>
   <div class="case-actions">
-    <input id="image-path" type="text" placeholder="/absolute/path/to/dvr.img">
+    <input id="image-path" type="text" placeholder="/path/to/image.E01 or .dd">
     <button id="btn-analyze">Analyze</button>
     <button id="btn-export" disabled>Export MP4</button>
     <button id="btn-report" disabled>Generate Report</button>
@@ -52,7 +54,8 @@
       <button class="tab active" data-view="table">Table</button>
       <button class="tab" data-view="timeline">Timeline</button>
       <button class="tab" data-view="viewer">Viewer</button>
-      <button class="tab" data-view="image_fs">Files in Image</button>
+      <button class="tab" data-view="xplore">Image Explorer</button>
+      <button class="tab" data-view="local">Local Disk</button>
       <button class="tab" data-view="persons">Persons</button>
       <button class="tab" data-view="ml">ML Analysis</button>
       <button class="tab" data-view="mcp">MCP Tools</button>
@@ -97,18 +100,8 @@
       <div class="viewer-meta" id="viewer-meta"></div>
     </div>
 
-    <div id="view-image_fs" class="view">
-      <div class="ifs-toolbar">
-        <input id="ifs-path" type="text" placeholder="/" value="/">
-        <button id="ifs-go">→</button>
-        <button id="ifs-up" title="parent">↑</button>
-        <button id="ifs-refresh" title="refresh">⟳</button>
-      </div>
-      <div class="ifs-body">
-        <div id="ifs-tree" class="ifs-tree"></div>
-        <div id="ifs-preview" class="ifs-preview"></div>
-      </div>
-    </div>
+    <div id="view-xplore" class="view"><div id="xplore-root" class="xp-root"></div></div>
+    <div id="view-local" class="view"><div id="local-root" class="xp-root"></div></div>
 
 <div id="view-persons" class="view">
       <div class="ml-controls">
@@ -131,13 +124,7 @@
       </div>
       <div class="ml-results" id="ml-results"></div>
     </div>
-    <div id="view-mcp" class="view">
-      <div class="mcp-header">
-        <p>SATYA exposes forensic tools to AI agents via MCP.</p>
-        <pre class="mcp-config" id="mcp-config"></pre>
-      </div>
-      <div class="mcp-tools" id="mcp-tools"></div>
-    </div>
+    <div id="view-mcp" class="view"><div id="mcp-panel" class="mcp-panel"></div></div>
     <div id="view-custody" class="view">
       <p class="muted" style="padding:12px">Chain-of-custody ledger.</p>
       <table><thead><tr><th>#</th><th>Timestamp</th><th>Event</th><th>Hash</th><th>Status</th></tr></thead>
@@ -155,26 +142,25 @@
       </div>
     </div>
     <div id="view-report" class="view">
-      <div style="padding:14px">
-        <p class="muted">Generate a court-ready PDF report.</p>
-        <button id="btn-gen-report">Generate PDF</button>
-        <div id="report-status" class="muted" style="margin-top:10px"></div>
+      <div class="report-form">
+        <h3>Forensic report (PDF)</h3>
+        <p class="muted">For HeimVision/JUAN evidence this produces the detailed report: integrity and acquisition
+          details, disk layout, recording timeline chart, evidence frames decoded from the image, deleted entries,
+          exports with hashes, the signed activity log, a draft examiner's certificate and a slot index.</p>
+        <div class="rf-grid">
+          <label>Case ID<input id="rf-case-id" placeholder="defaults to the evidence name"></label>
+          <label>Case name<input id="rf-case-name" placeholder="e.g. Shop burglary, 4 Aug 2021"></label>
+          <label>Examiner<input id="rf-examiner" placeholder="name and designation"></label>
+          <label>Organisation<input id="rf-org" placeholder="lab / unit"></label>
+          <label>Evidence frames<input id="rf-thumbs" type="number" min="0" max="24" value="8"></label>
+        </div>
+        <label class="rf-notes">Examiner notes<textarea id="rf-notes" rows="4" placeholder="Context, request, scope…"></textarea></label>
+        <div class="rf-actions"><button id="btn-gen-report">Generate PDF</button>
+          <span class="muted">Tip: run Tools › Verify image integrity first so the report includes a full re-hash.</span></div>
+        <div id="report-status" class="muted" style="margin-top:12px"></div>
       </div>
     </div>
   </section>
-  <aside id="pane-details">
-    <div class="pane-header">
-      <span id="detail-title">Details</span>
-      <div class="detail-tabs">
-        <button class="dt active" data-dt="meta">Meta</button>
-        <button class="dt" data-dt="hex">Hex</button>
-        <button class="dt" data-dt="claims">Claims</button>
-      </div>
-    </div>
-    <div id="detail-meta" class="detail-view active"></div>
-    <div id="detail-hex" class="detail-view"><pre id="hex-pre"></pre></div>
-    <div id="detail-claims" class="detail-view"></div>
-  </aside>
 </div>
 <div id="status-bar">
   <span id="status">idle</span>
